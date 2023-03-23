@@ -1,0 +1,105 @@
+import tensorflow as tf
+import numpy as np
+from scipy.io import loadmat
+from tensorflow.keras.layers import Input, Dense, concatenate, Lambda
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.initializers import RandomUniform
+from tensorflow.keras.constraints import NonNeg
+
+# Load T_synethic data
+Data = loadmat('KODC_Tobs.mat')
+Tobs = np.transpose(Data['Tg'])
+
+# Load dimensions
+t = np.load('t_dim.npy')
+z = np.load('z_dim.npy')
+Nt = t.shape[0]
+Nz = z.shape[0]
+
+# Define initial and boundary conditions
+T0 = Tobs[:, 0]
+Ts = 15.0
+Tb = 0.3
+
+# Define constants
+A = np.load('A_aoi.npy')
+dt = 0.5*86400
+dz = 5.0
+
+# Define neural network architecture
+initializer = RandomUniform(minval=-0.01, maxval=0.01)
+const_initializer = tf.constant_initializer(A)
+const_constraint = NonNeg()
+
+def nn_model():
+    X_input = Input(shape=(2,))
+    X = Dense(100, activation='tanh', kernel_initializer=initializer)(X_input)
+    X = Dense(100, activation='tanh', kernel_initializer=initializer)(X)
+    X = Dense(Nz, activation='linear', kernel_initializer=const_initializer, bias_initializer='zeros',
+              kernel_constraint=const_constraint, use_bias=True)(X)
+    return Model(inputs=X_input, outputs=X)
+
+# Define loss function and optimizer
+model = nn_model()
+optimizer = Adam(lr=0.001)
+mse = MeanSquaredError()
+
+# Define physics-informed loss function
+@tf.function
+def physics_loss(x, t, model):
+    with tf.GradientTape(persistent=True) as tape:
+        tape.watch(x)
+        tape.watch(t)
+        T = model(concatenate([x, t]))
+        T_t = tape.gradient(T, t)
+        T_x = tape.gradient(T, x)
+        T_xx = tape.gradient(T_x, x)
+        del tape
+    D = tf.exp(model.layers[-1].bias)
+    alpha = D*1e-4*dt/dz**2
+    beta = tf.math.tanh((x+model.layers[-1].kernel)[:, :1]/25.0)
+    w = (A*(1.0-model.layers[-1].kernel[:, 1:]+model.layers[-1].kernel[:, 1:]*tf.math.tanh((t-30.0*365.0)/180.0))+model.layers[-1].bias[:, :1])/(365.0*86400.0)
+    physics_loss = mse(T_t, alpha*T_xx-beta*T_x)
+    return physics_loss
+
+
+# Train the model
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+
+for epoch in range(num_epochs):
+    with tf.GradientTape() as tape:
+        predicted_T = model(tf.convert_to_tensor(np.concatenate([t, z], axis=1), dtype=tf.float32))
+        residual = Tobs_tf - predicted_T
+
+        # Compute the mean squared error loss
+        mse_loss = tf.reduce_mean(tf.square(residual))
+
+        # Compute the L2 regularization loss
+        l2_loss = sum(model.losses)
+
+        # Compute the total loss
+        loss = mse_loss + l2_reg_coeff * l2_loss
+
+    # Compute the gradients of the loss with respect to the model's trainable variables
+    gradients = tape.gradient(loss, model.trainable_variables)
+
+    # Apply the gradients to the model's trainable variables
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+
+    # Print the loss for every 100 epochs
+    if epoch % 100 == 0:
+        print(f"Epoch {epoch}: Loss={loss:.4f}")
+
+# Extract the optimized parameters
+D_opt, a_opt, b_opt, c_opt, d_opt, e_opt, f_opt, g_opt = model.get_weights()
+print('Optimized D:', D_opt)
+print('Optimized a:', a_opt)
+print('Optimized b:', b_opt)
+print('Optimized c:', c_opt)
+print('Optimized d:', d_opt)
+print('Optimized e:', e_opt)
+print('Optimized f:', f_opt)
+print('Optimized g:', g_opt)
+    
